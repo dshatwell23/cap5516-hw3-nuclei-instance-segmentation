@@ -102,6 +102,28 @@ def build_dataloaders(
     return train_loader, val_loader, test_loader
 
 
+def build_eval_dataloader(
+    config: ExperimentConfig,
+    split_csv: Path,
+    split_name: str,
+    eval_batch_size: int | None = None,
+    num_workers: int | None = None,
+) -> DataLoader:
+    dataset = NuInsSegDataset(
+        split_csv,
+        image_size=config.image_size,
+        mode=split_name,
+        enable_augmentation=False,
+    )
+    return DataLoader(
+        dataset,
+        batch_size=eval_batch_size if eval_batch_size is not None else config.eval_batch_size,
+        shuffle=False,
+        num_workers=num_workers if num_workers is not None else config.num_workers,
+        pin_memory=torch.cuda.is_available(),
+    )
+
+
 def _snapshot_split_files(split_dir: Path, output_dir: Path) -> None:
     snapshot_dir = output_dir / "split_snapshot"
     snapshot_dir.mkdir(parents=True, exist_ok=True)
@@ -149,7 +171,6 @@ def _save_prediction_arrays(
     return project_relative(binary_path), project_relative(instance_path)
 
 
-@torch.no_grad()
 def evaluate_loader(
     model: torch.nn.Module,
     dataloader: DataLoader,
@@ -158,68 +179,72 @@ def evaluate_loader(
     output_dir: Path,
     split_name: str,
     save_predictions: bool = False,
+    use_autocast: bool = True,
 ) -> tuple[Dict[str, float], List[Dict[str, object]]]:
     model.eval()
     rows: List[Dict[str, object]] = []
     total_loss = 0.0
     progress = tqdm(dataloader, desc=f"Evaluating {split_name}", leave=False)
-    for batch in progress:
-        images = batch["image"].to(device)
-        binary_targets = batch["binary_mask"].to(device)
-        ignore_masks = batch["ignore_mask"].to(device)
-        logits = forward_logits(model, images, target_hw=binary_targets.shape[-2:])
-        loss = masked_bce_with_logits(logits, binary_targets, ignore_masks) + masked_soft_dice_loss(
-            logits, binary_targets, ignore_masks
-        )
-        total_loss += float(loss.item())
-
-        probabilities = torch.sigmoid(logits).cpu().numpy()
-        binary_targets_np = batch["binary_mask"].cpu().numpy()
-        ignore_masks_np = batch["ignore_mask"].cpu().numpy()
-        instance_targets_np = batch["instance_mask"].cpu().numpy()
-
-        for sample_index in range(images.shape[0]):
-            sample_probability = probabilities[sample_index, 0]
-            sample_ignore = ignore_masks_np[sample_index, 0] > 0
-            sample_gt_binary = binary_targets_np[sample_index, 0] > 0.5
-            sample_gt_instances = np.array(instance_targets_np[sample_index], copy=True)
-            sample_gt_instances[sample_ignore] = 0
-
-            sample_pred_binary = sample_probability >= config.probability_threshold
-            sample_pred_binary[sample_ignore] = False
-            sample_pred_instances = probability_to_instances(
-                sample_probability,
-                threshold=config.probability_threshold,
-                min_object_size=config.min_object_size,
-                peak_min_distance=config.peak_min_distance,
-                peak_threshold_abs=config.peak_threshold_abs,
-                ignore_mask=sample_ignore,
-            )
-            metrics_row: Dict[str, object] = {
-                "split": split_name,
-                "sample_id": batch["sample_id"][sample_index],
-                "organ": batch["organ"][sample_index],
-                "image_path": batch["image_path"][sample_index],
-                "instance_mask_path": batch["instance_mask_path"][sample_index],
-                "binary_mask_path": batch["binary_mask_path"][sample_index]
-                if "binary_mask_path" in batch
-                else batch["instance_mask_path"][sample_index],
-                "ignore_mask_path": batch["ignore_mask_path"][sample_index],
-                "dice": dice_score(sample_pred_binary, sample_gt_binary, sample_ignore),
-                "aji": aggregate_jaccard_index(sample_gt_instances, sample_pred_instances, sample_ignore),
-                "pq": panoptic_quality(sample_gt_instances, sample_pred_instances, sample_ignore),
-            }
-            if save_predictions:
-                prediction_binary_path, prediction_instance_path = _save_prediction_arrays(
-                    output_dir,
-                    split_name=split_name,
-                    sample_id=batch["sample_id"][sample_index],
-                    pred_binary=sample_pred_binary,
-                    pred_instances=sample_pred_instances,
+    with torch.inference_mode():
+        for batch in progress:
+            images = batch["image"].to(device)
+            binary_targets = batch["binary_mask"].to(device)
+            ignore_masks = batch["ignore_mask"].to(device)
+            context = autocast(enabled=True) if use_autocast and device.type == "cuda" else nullcontext()
+            with context:
+                logits = forward_logits(model, images, target_hw=binary_targets.shape[-2:])
+                loss = masked_bce_with_logits(logits, binary_targets, ignore_masks) + masked_soft_dice_loss(
+                    logits, binary_targets, ignore_masks
                 )
-                metrics_row["prediction_binary_path"] = prediction_binary_path
-                metrics_row["prediction_instance_path"] = prediction_instance_path
-            rows.append(metrics_row)
+            total_loss += float(loss.item())
+
+            probabilities = torch.sigmoid(logits).cpu().numpy()
+            binary_targets_np = batch["binary_mask"].cpu().numpy()
+            ignore_masks_np = batch["ignore_mask"].cpu().numpy()
+            instance_targets_np = batch["instance_mask"].cpu().numpy()
+
+            for sample_index in range(images.shape[0]):
+                sample_probability = probabilities[sample_index, 0]
+                sample_ignore = ignore_masks_np[sample_index, 0] > 0
+                sample_gt_binary = binary_targets_np[sample_index, 0] > 0.5
+                sample_gt_instances = np.array(instance_targets_np[sample_index], copy=True)
+                sample_gt_instances[sample_ignore] = 0
+
+                sample_pred_binary = sample_probability >= config.probability_threshold
+                sample_pred_binary[sample_ignore] = False
+                sample_pred_instances = probability_to_instances(
+                    sample_probability,
+                    threshold=config.probability_threshold,
+                    min_object_size=config.min_object_size,
+                    peak_min_distance=config.peak_min_distance,
+                    peak_threshold_abs=config.peak_threshold_abs,
+                    ignore_mask=sample_ignore,
+                )
+                metrics_row: Dict[str, object] = {
+                    "split": split_name,
+                    "sample_id": batch["sample_id"][sample_index],
+                    "organ": batch["organ"][sample_index],
+                    "image_path": batch["image_path"][sample_index],
+                    "instance_mask_path": batch["instance_mask_path"][sample_index],
+                    "binary_mask_path": batch["binary_mask_path"][sample_index]
+                    if "binary_mask_path" in batch
+                    else batch["instance_mask_path"][sample_index],
+                    "ignore_mask_path": batch["ignore_mask_path"][sample_index],
+                    "dice": dice_score(sample_pred_binary, sample_gt_binary, sample_ignore),
+                    "aji": aggregate_jaccard_index(sample_gt_instances, sample_pred_instances, sample_ignore),
+                    "pq": panoptic_quality(sample_gt_instances, sample_pred_instances, sample_ignore),
+                }
+                if save_predictions:
+                    prediction_binary_path, prediction_instance_path = _save_prediction_arrays(
+                        output_dir,
+                        split_name=split_name,
+                        sample_id=batch["sample_id"][sample_index],
+                        pred_binary=sample_pred_binary,
+                        pred_instances=sample_pred_instances,
+                    )
+                    metrics_row["prediction_binary_path"] = prediction_binary_path
+                    metrics_row["prediction_instance_path"] = prediction_instance_path
+                rows.append(metrics_row)
 
     summary = summarize_metric_rows(rows, metric_names=("dice", "aji", "pq"))
     summary["loss_mean"] = total_loss / max(len(dataloader), 1)
@@ -251,21 +276,18 @@ def evaluate_checkpoint(
     output_dir: Path,
     split_name: str,
     save_predictions: bool = True,
+    eval_batch_size: int | None = None,
+    num_workers: int | None = None,
+    use_autocast: bool = True,
 ) -> Dict[str, object]:
     set_deterministic_seed(config.random_seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    dataset = NuInsSegDataset(
-        split_csv,
-        image_size=config.image_size,
-        mode=split_name,
-        enable_augmentation=False,
-    )
-    dataloader = DataLoader(
-        dataset,
-        batch_size=config.eval_batch_size,
-        shuffle=False,
-        num_workers=config.num_workers,
-        pin_memory=torch.cuda.is_available(),
+    dataloader = build_eval_dataloader(
+        config,
+        split_csv=split_csv,
+        split_name=split_name,
+        eval_batch_size=eval_batch_size,
+        num_workers=num_workers,
     )
     model, parameter_summary = build_model(config, device=device)
     del parameter_summary
@@ -278,6 +300,7 @@ def evaluate_checkpoint(
         output_dir=output_dir,
         split_name=split_name,
         save_predictions=save_predictions,
+        use_autocast=use_autocast,
     )
     save_metric_rows(output_dir / f"{split_name}_metrics.csv", rows)
     (output_dir / f"{split_name}_summary.json").write_text(json.dumps(summary, indent=2))
@@ -301,6 +324,12 @@ def train_fold(config: ExperimentConfig, fold: int) -> Dict[str, object]:
         [parameter for parameter in model.parameters() if parameter.requires_grad],
         lr=config.learning_rate,
         weight_decay=config.weight_decay,
+    )
+    total_optimizer_steps = math.ceil(config.max_steps / config.grad_accum_steps)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=max(total_optimizer_steps, 1),
+        eta_min=config.learning_rate / 100.0,
     )
     scaler = GradScaler(enabled=config.amp and device.type == "cuda")
 
@@ -341,6 +370,7 @@ def train_fold(config: ExperimentConfig, fold: int) -> Dict[str, object]:
                 scaler.update()
             else:
                 optimizer.step()
+            scheduler.step()
             optimizer.zero_grad(set_to_none=True)
 
         if step % config.log_every == 0:

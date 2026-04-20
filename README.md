@@ -11,15 +11,6 @@ This workspace now contains a repo-local training and evaluation pipeline for fi
 - Best checkpoint: selected by validation AJI.
 - Default model: MobileSAM `vit_t` with encoder and decoder LoRA enabled, rank 4.
 
-## Added Files
-- `nuinsseg_sam/`: dataset indexing, dataloaders, MobileSAM+LoRA wrapper, trainer, metrics, post-processing, visualization.
-- `scripts/prepare_nuinsseg_splits.py`: build manifest and deterministic fold CSVs.
-- `scripts/train_nuinsseg_fold.py`: train one fold and run final test evaluation.
-- `scripts/run_nuinsseg_cv.py`: run the full cross-validation workflow and aggregate results.
-- `scripts/evaluate_nuinsseg_checkpoint.py`: standalone evaluation for an existing checkpoint.
-- `tests/`: manifest/split, metrics, post-processing, and dataset smoke tests.
-- `requirements-nuinsseg.txt`: package list for the new pipeline.
-
 ## Environment Notes
 The active environment in this workspace is not ready to run training yet. The missing or inconsistent pieces observed during implementation were:
 - `torch`
@@ -53,26 +44,39 @@ This writes:
 ```bash
 python scripts/train_nuinsseg_fold.py \
   --dataset-root archive \
-  --output-root runs/nuinsseg_mobilesam_lora \
-  --mobile-sam-ckpt /absolute/path/to/mobile_sam.pt \
+  --output-root runs/nuinsseg_mobilesam_lora_v2 \
+  --mobile-sam-ckpt /media/dshatwell/SharedData/courses/cap5516_medical_imaging_computing/cap5516-hw3-nuclei-instance-segmentation/checkpoints/mobile_sam.pt \
   --fold 0 \
-  --batch-size 4 \
-  --grad-accum-steps 2 \
-  --max-steps 4000 \
+  --batch-size 16 \
+  --num-workers 8 \
+  --grad-accum-steps 1 \
+  --max-steps 8000 \
   --eval-every 500 \
-  --save-every 500
+  --log-every 100 \
+  --save-every 100 \
+  --probability-threshold 0.5 \
+  --min-object-size 15 \
+  --peak-min-distance 7 \
+  --peak-threshold-abs 0.086
 ```
 
 ### 3. Run the full 5-fold pipeline
 ```bash
 python scripts/run_nuinsseg_cv.py \
   --dataset-root archive \
-  --output-root runs/nuinsseg_mobilesam_lora \
-  --mobile-sam-ckpt /absolute/path/to/mobile_sam.pt \
-  --batch-size 4 \
-  --grad-accum-steps 2 \
-  --max-steps 4000 \
-  --eval-every 500
+  --output-root runs/nuinsseg_mobilesam_lora_final \
+  --mobile-sam-ckpt /media/dshatwell/SharedData/courses/cap5516_medical_imaging_computing/cap5516-hw3-nuclei-instance-segmentation/checkpoints/mobile_sam.pt \
+  --batch-size 16 \
+  --num-workers 8 \
+  --grad-accum-steps 1 \
+  --max-steps 10000 \
+  --eval-every 500 \
+  --log-every 100 \
+  --save-every 100 \
+  --probability-threshold 0.5 \
+  --min-object-size 15 \
+  --peak-min-distance 7 \
+  --peak-threshold-abs 0.086
 ```
 
 ### 4. Re-evaluate an existing checkpoint
@@ -90,6 +94,56 @@ python scripts/evaluate_nuinsseg_checkpoint.py \
   --split-name test
 ```
 
+### 5. Sweep post-processing on an existing checkpoint
+Use this to search watershed and threshold parameters on a trained run without retraining the model. This is most useful on the validation split, then you can reuse the best settings for test evaluation.
+
+```bash
+python scripts/sweep_nuinsseg_postprocess.py \
+  --run-dir runs/nuinsseg_mobilesam_lora/fold_0 \
+  --split-name val \
+  --metric aji_mean \
+  --probability-thresholds 0.35 0.4 0.45 0.5 0.55 \
+  --min-object-sizes 5 10 15 20 \
+  --peak-min-distances 2 3 4 5 6 \
+  --peak-threshold-abs-values 0.05 0.1 0.15 0.2
+```
+
+You can also provide the grid as JSON:
+
+```bash
+python scripts/sweep_nuinsseg_postprocess.py \
+  --run-dir runs/nuinsseg_mobilesam_lora/fold_0 \
+  --split-name val \
+  --metric pq_mean \
+  --grid-json '{"probability_threshold":[0.4,0.45,0.5],"min_object_size":[5,10,15],"peak_min_distance":[3,4,5],"peak_threshold_abs":[0.05,0.1,0.15]}'
+```
+
+For random search, the script samples uniformly from the min and max implied by the values you provide for each parameter. Integer-valued parameters are sampled as integers.
+
+```bash
+python scripts/sweep_nuinsseg_postprocess.py \
+  --run-dir runs/nuinsseg_mobilesam_lora/fold_0 \
+  --split-name val \
+  --metric aji_mean \
+  --search-mode random \
+  --num-trials 50 \
+  --eval-batch-size 8 \
+  --num-workers 8 \
+  --use-autocast true \
+  --random-seed 19 \
+  --probability-thresholds 0.45 0.55 \
+  --min-object-sizes 12 16 \
+  --peak-min-distances 5 7 \
+  --peak-threshold-abs-values 0.08 0.1
+```
+
+Defaults:
+- search mode: `grid`
+- checkpoint: `checkpoint_best.pth`
+- split: `val`
+- output directory: `runs/.../fold_0/postprocess_sweep_val/`
+- predictions are not saved unless you pass `--save-predictions true`
+
 ## Output Layout
 Each fold writes to `runs/nuinsseg_mobilesam_lora/fold_<k>/`:
 - `config.json`, `config.yaml`
@@ -104,6 +158,14 @@ Each fold writes to `runs/nuinsseg_mobilesam_lora/fold_<k>/`:
 - `test_predictions/instances/`
 - `result.json`
 
+Each post-processing sweep writes to `runs/.../fold_<k>/postprocess_sweep_<split>/`:
+- `grid.json`
+- `search_config.json`
+- `sweep_results.csv`
+- `sweep_results.json`
+- `best_result.json`
+- `combo_*/` reevaluation outputs for each parameter combination
+
 The full 5-fold run also writes:
 - `cross_validation_summary.json`
 - `aggregate_test_metrics.csv`
@@ -115,28 +177,3 @@ The full 5-fold run also writes:
 - Instance metrics:
   - AJI
   - PQ with IoU threshold 0.5
-
-## Testing
-Recommended checks after dependencies are installed:
-```bash
-python -m unittest tests.test_manifest_and_splits tests.test_metrics tests.test_postprocess tests.test_dataset_loader
-```
-
-For a minimal end-to-end smoke run:
-```bash
-python scripts/train_nuinsseg_fold.py \
-  --dataset-root archive \
-  --output-root runs/nuinsseg_smoke \
-  --mobile-sam-ckpt /absolute/path/to/mobile_sam.pt \
-  --fold 0 \
-  --batch-size 1 \
-  --grad-accum-steps 1 \
-  --max-steps 10 \
-  --eval-every 5 \
-  --save-every 5
-```
-
-## Notes
-- The new pipeline is intentionally isolated from the original demo trainers in `finetune-SAM`.
-- Training uses 512x512 supervision and upsamples logits back to that size before loss and metrics.
-- Prompting is disabled; the pipeline uses the automatic no-prompt segmentation path.

@@ -6,10 +6,10 @@ from typing import Dict, List
 
 import numpy as np
 import torch
-from PIL import Image, ImageEnhance
+from PIL import Image
 from torch.utils.data import Dataset
 from torchvision.transforms import functional as TF
-from torchvision.transforms import InterpolationMode
+from torchvision.transforms import ColorJitter, InterpolationMode, RandomResizedCrop
 
 from .runtime import PROJECT_ROOT
 
@@ -26,6 +26,12 @@ class NuInsSegDataset(Dataset):
         self.image_size = image_size
         self.mode = mode
         self.enable_augmentation = enable_augmentation and mode == "train"
+        self.color_jitter = ColorJitter(
+            brightness=0.35,
+            contrast=0.35,
+            saturation=0.35,
+            hue=0.08,
+        )
         with self.split_csv.open("r", newline="") as handle:
             self.rows: List[Dict[str, str]] = list(csv.DictReader(handle))
 
@@ -62,14 +68,68 @@ class NuInsSegDataset(Dataset):
             instance_mask = np.rot90(instance_mask, rotation_k).copy()
             ignore_mask = np.rot90(ignore_mask, rotation_k).copy()
 
-        if torch.rand(1).item() < 0.8:
-            brightness = 0.9 + 0.2 * torch.rand(1).item()
-            contrast = 0.9 + 0.2 * torch.rand(1).item()
-            saturation = 0.9 + 0.2 * torch.rand(1).item()
-            image = ImageEnhance.Brightness(image).enhance(brightness)
-            image = ImageEnhance.Contrast(image).enhance(contrast)
-            image = ImageEnhance.Color(image).enhance(saturation)
+        if torch.rand(1).item() < 0.7:
+            image, instance_mask, ignore_mask = self._apply_random_resized_crop(
+                image, instance_mask, ignore_mask
+            )
 
+        if torch.rand(1).item() < 0.9:
+            image = self.color_jitter(image)
+
+        if torch.rand(1).item() < 0.3:
+            sigma = 0.1 + 1.9 * torch.rand(1).item()
+            image = TF.gaussian_blur(image, kernel_size=5, sigma=sigma)
+
+        return image, instance_mask, ignore_mask
+
+    def _apply_random_resized_crop(
+        self,
+        image: Image.Image,
+        instance_mask: np.ndarray,
+        ignore_mask: np.ndarray,
+    ) -> tuple[Image.Image, np.ndarray, np.ndarray]:
+        original_height, original_width = instance_mask.shape
+        top, left, height, width = RandomResizedCrop.get_params(
+            image,
+            scale=(0.7, 1.0),
+            ratio=(0.9, 1.1),
+        )
+        image = TF.resized_crop(
+            image,
+            top=top,
+            left=left,
+            height=height,
+            width=width,
+            size=[original_height, original_width],
+            interpolation=InterpolationMode.BILINEAR,
+            antialias=True,
+        )
+        instance_mask_image = Image.fromarray(instance_mask.astype(np.int32), mode="I")
+        ignore_mask_image = Image.fromarray(ignore_mask.astype(np.uint8), mode="L")
+        instance_mask = np.array(
+            TF.resized_crop(
+                instance_mask_image,
+                top=top,
+                left=left,
+                height=height,
+                width=width,
+                size=[original_height, original_width],
+                interpolation=InterpolationMode.NEAREST,
+            ),
+            dtype=np.int32,
+        )
+        ignore_mask = np.array(
+            TF.resized_crop(
+                ignore_mask_image,
+                top=top,
+                left=left,
+                height=height,
+                width=width,
+                size=[original_height, original_width],
+                interpolation=InterpolationMode.NEAREST,
+            ),
+            dtype=np.uint8,
+        )
         return image, instance_mask, ignore_mask
 
     def __getitem__(self, index: int) -> Dict[str, object]:

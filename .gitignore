@@ -1,1 +1,21 @@
+# OS files
+.DS_Store
+
+# Python cache/artifacts
+__pycache__/
+*.py[cod]
+
+# Optional Python/tooling
+.pytest_cache/
+.venv/
+venv/
+
+# Project outputs
 /archive/
+/runs/
+/report/
+/checkpoints/
+
+# Local PDFs or assignment docs if you truly want them ignored
+2308.01760v1.pdf
+Assignment-3.pdf

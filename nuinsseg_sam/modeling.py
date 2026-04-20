@@ -22,10 +22,21 @@ TASK_HEAD_PREFIXES = (
 def build_finetune_namespace(config: ExperimentConfig) -> SimpleNamespace:
     return SimpleNamespace(
         image_size=config.image_size,
-        devices=[0, 1],
+        devices=[0],
+        if_update_encoder=False,
+        if_encoder_adapter=False,
+        encoder_adapter_depths=[0, 1, 10, 11],
+        if_mask_decoder_adapter=False,
+        decoder_adapt_depth=2,
         if_encoder_lora_layer=config.enable_encoder_lora,
         if_decoder_lora_layer=config.enable_decoder_lora,
         encoder_lora_layer=config.encoder_lora_layers,
+        if_split_encoder_gpus=False,
+        gpu_fractions=[0.5, 0.5],
+        thd=False,
+        chunk=96,
+        depth=64,
+        encoder_depth_layer=[],
     )
 
 

@@ -91,11 +91,19 @@ class LoRA_Sam(nn.Module):
         # base_vit_dim = sam_model.image_encoder.patch_embed.proj.out_channels
         # dim = base_vit_dim
         if self.args.if_encoder_lora_layer:
+            image_encoder = sam_model.image_encoder
             if len(self.args.encoder_lora_layer)>0:
                 self.lora_layer = self.args.encoder_lora_layer
+            elif hasattr(image_encoder, "blocks"):
+                self.lora_layer = list(range(len(image_encoder.blocks)))
+            elif hasattr(image_encoder, "layers"):
+                # TinyViT keeps attention blocks in staged layers and reserves
+                # layers[0] for the convolutional stem.
+                self.lora_layer = list(range(len(image_encoder.layers) - 1))
             else:
-                self.lora_layer = list(
-                    range(len(sam_model.image_encoder.blocks)))
+                raise AttributeError(
+                    f"Unsupported image encoder for LoRA: {type(image_encoder).__name__}"
+                )
 
             # create for storage, then we can init them or load weights
             self.w_As = []  # These are linear layers
@@ -106,9 +114,9 @@ class LoRA_Sam(nn.Module):
                 param.requires_grad = False
 
             # Here, we do the surgery
-            try:
+            if hasattr(image_encoder, "blocks"):
                 # it is a SAM model
-                for t_layer_i, blk in enumerate(sam_model.image_encoder.blocks):
+                for t_layer_i, blk in enumerate(image_encoder.blocks):
                     # If we only want few lora layer instead of all
                     if t_layer_i not in self.lora_layer:
                         continue
@@ -132,11 +140,11 @@ class LoRA_Sam(nn.Module):
                         w_a_linear_v,
                         w_b_linear_v,
                     )
-            except:
-                for n, value in sam_model.image_encoder.layers[0].named_parameters(): # the conv layers
+            elif hasattr(image_encoder, "layers"):
+                for n, value in image_encoder.layers[0].named_parameters(): # the conv layers
                     value.requires_grad = True
                 # it is an mobile SAM model
-                for t_layer_i, layer in enumerate(sam_model.image_encoder.layers[1:]):
+                for t_layer_i, layer in enumerate(image_encoder.layers[1:]):
                     # If we only want few lora layer instead of all
                     if t_layer_i not in self.lora_layer:
                         continue
@@ -161,6 +169,10 @@ class LoRA_Sam(nn.Module):
                             w_a_linear_v,
                             w_b_linear_v,
                         )
+            else:
+                raise AttributeError(
+                    f"Unsupported image encoder for LoRA: {type(image_encoder).__name__}"
+                )
 
         if self.args.if_decoder_lora_layer:
             # Additional surgery for the mask decoder
