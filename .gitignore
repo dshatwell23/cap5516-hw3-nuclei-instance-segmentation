@@ -10,12 +10,13 @@ __pycache__/
 .venv/
 venv/
 
-# Project outputs
+# Project
 /archive/
 /runs/
 /report/
 /checkpoints/
 /tests/
+/NuInsSeg/
 
 # Local PDFs or assignment docs if you truly want them ignored
 2308.01760v1.pdf
