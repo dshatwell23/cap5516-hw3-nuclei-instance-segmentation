@@ -1,6 +1,6 @@
 # NuInsSeg MobileSAM LoRA Pipeline
 
-This workspace now contains a repo-local training and evaluation pipeline for fine-tuning MobileSAM with LoRA on NuInsSeg.
+This repo contains the training and evaluation pipeline for fine-tuning MobileSAM with LoRA on NuInsSeg.
 
 ## Design Choices
 - Training target: binary nuclei foreground derived from `label masks modify > 0`.
@@ -11,23 +11,10 @@ This workspace now contains a repo-local training and evaluation pipeline for fi
 - Best checkpoint: selected by validation AJI.
 - Default model: MobileSAM `vit_t` with encoder and decoder LoRA enabled, rank 4.
 
-## Environment Notes
-The active environment in this workspace is not ready to run training yet. The missing or inconsistent pieces observed during implementation were:
-- `torch`
-- `torchvision`
-- `monai`
-- `tensorboardX`
-- `segment-anything`
-- a NumPy 2.x environment that conflicts with older compiled packages
-
-Use `numpy==1.26.4` for this pipeline. The pinned list is in `requirements-nuinsseg.txt`.
-
-You also need a MobileSAM checkpoint file, typically `mobile_sam.pt`. The scripts fail fast if that checkpoint path is missing.
-
 ## How To Run
 Run all commands from the project root:
 
-### 1. Prepare manifest and folds
+### 1. Prepare folds
 ```bash
 python scripts/prepare_nuinsseg_splits.py \
   --dataset-root archive \
@@ -60,7 +47,7 @@ python scripts/train_nuinsseg_fold.py \
   --peak-threshold-abs 0.086
 ```
 
-### 3. Run the full 5-fold pipeline
+### 3. Train full 5-folds
 ```bash
 python scripts/run_nuinsseg_cv.py \
   --dataset-root archive \
@@ -79,7 +66,7 @@ python scripts/run_nuinsseg_cv.py \
   --peak-threshold-abs 0.086
 ```
 
-### 4. Re-evaluate an existing checkpoint
+### 4. Eval existing checkpoint
 ```bash
 python scripts/evaluate_nuinsseg_checkpoint.py \
   --run-dir runs/nuinsseg_mobilesam_lora/fold_0
@@ -136,13 +123,6 @@ python scripts/sweep_nuinsseg_postprocess.py \
   --peak-min-distances 5 7 \
   --peak-threshold-abs-values 0.08 0.1
 ```
-
-Defaults:
-- search mode: `grid`
-- checkpoint: `checkpoint_best.pth`
-- split: `val`
-- output directory: `runs/.../fold_0/postprocess_sweep_val/`
-- predictions are not saved unless you pass `--save-predictions true`
 
 ## Output Layout
 Each fold writes to `runs/nuinsseg_mobilesam_lora/fold_<k>/`:
